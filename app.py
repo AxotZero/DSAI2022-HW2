@@ -38,3 +38,4 @@ if __name__ == "__main__":
 
             # this is your option, you can leave it empty.
             trader.re_training()
+    print()

@@ -20,16 +20,17 @@ class MetricTracker:
         self.num_pred = num_pred
     
     def compute_acc(self, pred, target):
-        pred = pred[:, -(self.num_pred):-1]
+        # pred = pred[:, -(self.num_pred):-1]
         pred = np.argmax(pred, axis=1)
-        match = pred == target
+        match = (pred == target)
         acc = np.mean(match)
         return acc
 
     def compute_profit(self, preds, target):
         # get stock df
+        columns = COLS + list(range(target[0].shape[-1] - 4))
         stock_dfs = [
-            pd.DataFrame(data=t, columns=COLS)
+            pd.DataFrame(data=t, columns=columns)
             for t in target
         ]
         # get action
