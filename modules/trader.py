@@ -9,14 +9,13 @@ from sklearn.preprocessing import MinMaxScaler, QuantileTransformer
 import numpy as np
 import torch
 import torch.nn as nn
+
 from tqdm import tqdm
 import pandas as pd
  
 # my lib
-from .constant import COLS, CLASS_ACTION_MAP, BUY_IDX, NONE_IDX, SELL_IDX
-from .data_utils import get_loader
-from .model import GruClassifier 
-from .metric import MetricTracker
+from .constant import COLS, BUY_IDX, NONE_IDX, SELL_IDX
+from .model import GruClassifier, GruRatioRegressor
 from .profit_calculator import check_stock_actions_length, calculate_profit
 
 
@@ -30,36 +29,13 @@ class TraderMode(IntEnum):
     TESTING = 1
 
 
-class BaseTrader:
-    def __init__(self, normalizer_name='quantile'):
-        self.mode = TraderMode.TRAINING
-
-    def get_normalizer(self, normalizer_name):
-        if normalizer_name == 'quantile':
-            return QuantileTransformer(output_distribution='normal')
-        elif normalizer_name == 'minmax':
-            return MinMaxScaler()
-
-    def train(self, data):
-        raise NotImplementedError
-    
-    def predict_action(self, row):
-        raise NotImplementedError
-
-
-class Trader(BaseTrader):
+class Trader:
     def __init__(self, 
-                 epochs=10, batch_size=128, 
-                 lr=1e-3, model_hidden_size=32,
-                 num_past=30, num_pred=20, 
-                 normalizer_name='quantile'):
-        super().__init__(normalizer_name)
+                 epochs=400, lr=1e-2, model_hidden_size=16,
+                 num_past=20):
 
-        self.normalizer = self.get_normalizer(normalizer_name)
         self.num_past = num_past
-        self.num_pred = num_pred
         self.epochs = epochs
-        self.batch_size = batch_size
         self.model_hidden_size = model_hidden_size
         self.lr = lr
         
@@ -67,104 +43,98 @@ class Trader(BaseTrader):
         self.mode = TraderMode.TRAINING
         
         # get data
+        # self.x_normalizer = MinMaxScaler(feature_range=(-1, 1))
+        self.x_normalizer = QuantileTransformer(output_distribution='normal')
         self.raw_data = deepcopy(data)
-
-        # add moving average
-        tmp = pd.DataFrame(data=self.raw_data, columns=list(range(4)))
-        for window in [3, 5, 7, 10, 15, 20]:
-            tmp[f'ma{window}'] = tmp[0].rolling(window).mean()
-        self.raw_data = tmp.dropna().values
-        del tmp
-
-        # split train, valid
-        train_data = deepcopy(self.raw_data[:-self.num_past])
-        valid_data = deepcopy(self.raw_data[-(self.num_past+self.num_pred):])
-
-        # normalize
-        self.normalizer.fit(train_data)
-        train_data = self.normalizer.transform(train_data)
-        valid_data = self.normalizer.transform(valid_data)
+        self.raw_data = self.x_normalizer.fit_transform(self.raw_data)
         
-        # get dataloader
-        train_loader, valid_loader = get_loader(
-            train_data, valid_data,
-            self.num_past, self.num_pred, self.batch_size
-        )
+        # generate x, y
+        datas = []
+        targets = []
+        for i in range(len(self.raw_data) - self.num_past - 1):
+            datas.append(self.raw_data[i: i+self.num_past])
+            target1 = self.raw_data[i+1: i+self.num_past+1, [0]]
+            target2 = self.raw_data[i+2: i+self.num_past+2, [0]]
+            target = np.concatenate([target1, target2], axis=1)
+            targets.append(target)
+            # bp()
+
+        datas = np.array(datas)
+        targets = np.array(targets)
+
+        # shuffle
+        idx_full = np.arange(len(datas))
+        np.random.seed(0)
+        np.random.shuffle(idx_full)
+        datas = datas[idx_full]
+        targets = targets[idx_full]
+
+        # train_valid split
+        valid_ratio = 0.2
+        valid_size = round(valid_ratio * datas.shape[0])
+        train_size = datas.shape[0] - valid_size
+
+        train_x, train_y = datas[:train_size], targets[:train_size]
+        valid_x, valid_y = datas[train_size:], targets[train_size:]
+
+
+        # convert to tensor
+        train_x = torch.tensor(train_x).float()
+        train_y = torch.tensor(train_y).float()
+        valid_x = torch.tensor(valid_x).float()
+        valid_y = torch.tensor(valid_y).float()
+
+        print(train_x.size())
+        print(train_y.size())
+        print(valid_x.size())
+        print(valid_y.size())
 
         # training setup
-        self.model = GruClassifier(
-            num_feat=train_data.shape[-1],
-            hidden_size=self.model_hidden_size
+        self.model = GruRatioRegressor(
+            num_feat=4,
+            num_out= 2,
+            hidden_size=self.model_hidden_size,
         )
         optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=self.lr
         )
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.MSELoss()
 
         # core metric
-        best_profit = float("-inf")
-        val_loss = float("inf")
+        best_val_loss = float("inf")
+        best_epoch = -1
 
         # start training
         for epoch in range(self.epochs):
 
-            # print(f'=== epoch: {epoch} ===')
+            print(f'=== epoch: {epoch} ===')
 
+            # train
             self.model.train()
-            mt = MetricTracker(num_pred=self.num_pred)
-            # pbar = tqdm(train_loader, ncols=100)
-            for x, class_y, raw_y in train_loader:
-                # prediction
-                pred, _ = self.model(x)
-                
-                # the prediction is [-num_pred: -1)], 
-                # the last prediction is redundant
-                pred = pred[:, -(self.num_pred):-1].reshape(-1, 3)
-                class_y = class_y.view(-1)
+            pred, _ = self.model(train_x)
+            # bp()
+            loss = criterion(pred, train_y)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            print(f'Train epoch: {epoch}, mse: {loss.item() :.6f}')
 
-                loss = criterion(pred, class_y)
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-
-            ## print training metric 
-            #     sizes = raw_y.size()
-            #     raw_y = raw_y.numpy().reshape(-1, sizes[-1])
-            #     raw_y = self.normalizer.inverse_transform(raw_y)
-            #     raw_y = raw_y.reshape(*sizes)
-            #     mt.update(pred, class_y, raw_y, loss.item())
-            # print(f'Train epoch: {epoch}, {mt}')
-
+            # valid
             self.model.eval()
-            mt = MetricTracker(num_pred=self.num_pred)
-            for x, class_y, raw_y in valid_loader:
-                with torch.no_grad():
-                    pred, _ = self.model(x)
-                    pred = pred[:, -(self.num_pred):-1].reshape(-1, 3)
-                    class_y = class_y.view(-1)
-                    loss = criterion(pred, class_y)
+            pred, _ = self.model(valid_x)
+            loss = criterion(pred, valid_y)
+            print(f'Valid epoch: {epoch}, mse: {loss.item() :.6f}')
+            
+            # check whether get better result
+            if loss.item() < best_val_loss:
+                best_val_loss = loss.item()
+                best_epoch = epoch
+                torch.save(self.model.state_dict(), "model.pth")
 
-                # build raw_y to compute val_profit
-                sizes = raw_y.size()
-                raw_y = raw_y.numpy().reshape(-1, sizes[-1])
-                raw_y = self.normalizer.inverse_transform(raw_y)
-                raw_y = raw_y.reshape(*sizes)
-                
-                mt.update(pred, class_y, raw_y, loss.item())
-
-                if (mt.profit / mt.count) > best_profit:
-                    best_profit = (mt.profit / mt.count)
-                #     torch.save(self.model.state_dict(), "model.pth")
-                
-                if loss.item() < val_loss:
-                    val_loss = loss.item()
-                    torch.save(self.model.state_dict(), "model.pth")
-
-            print(f'Valid epoch: {epoch}, {mt}')
-        
+    
         print('=== Stop Training ===')
-        print(f'Best val_profit: {best_profit}, val_loss: {val_loss}')
+        print(f'Best val_loss: {best_val_loss:.6f} at epoch {best_epoch}')
     
     def predict_action(self, row):
         
@@ -176,43 +146,27 @@ class Trader(BaseTrader):
             self.model.load_state_dict(torch.load("model.pth"))
             self.model.eval()
 
-            # get current hidden state from previous raw_data
-            with torch.no_grad():
-                pre_x = self.normalizer.transform(self.raw_data[-(self.num_past):])
-                pre_x = torch.tensor(pre_x).unsqueeze(0).float()
-                _, ht = self.model(pre_x)
-                self.ht = ht.detach().numpy()
-            
-            # this variable generate action
             self.cur_sum = 0
-            print('origin action: ')
 
-        # add moving average to row
-        row = list(row)
-        for window in [3, 5, 7, 10, 15, 20]:
-            # bp()
-            row.append(np.mean([row[0]] + list(self.raw_data[-window+1:, 0])))
-        row = np.array(row).reshape(1, -1)
 
         # append new row to raw_data
+        row = np.array(row).reshape(1, -1)
+        row = self.x_normalizer.transform(row)
         self.raw_data = np.concatenate((self.raw_data, row), 0)
-        row = self.normalizer.transform(row)
+        _input = self.raw_data[-self.num_past:]
         
-        # get previous hidden state
-        h0 = torch.tensor(self.ht)
-        # bp()
         # predict
         with torch.no_grad():
-            row = torch.tensor(row).unsqueeze(0).float()
-            pred, ht = self.model(row, h0)
+            _input = torch.tensor(_input).unsqueeze(0).float()
+            pred, ht = self.model(_input, )
 
-        # set ht to current hidden state for next iteration
-        self.ht = ht.detach().numpy()
 
         # generate action
-        pred = pred.detach().numpy().reshape(-1)
-        action = CLASS_ACTION_MAP[np.argmax(pred)]
+        pred = pred[:, -1].detach().squeeze().numpy()
+        # action = BUY_IDX if pred[1] > pred[0] else SELL_IDX
+        action = BUY_IDX if pred[1] > pred[0] else SELL_IDX
         print(action, end=' ')
+        # print(pred)
         if abs(self.cur_sum + action) >= 2:
             action = 0
         self.cur_sum += action
@@ -221,6 +175,7 @@ class Trader(BaseTrader):
     
     def re_training(self):
         pass
+
 
 
 

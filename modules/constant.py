@@ -1,15 +1,5 @@
 COLS = ['open', 'high', 'low', 'close']
 
-NONE_CLASS_IDX = 1
-BUY_CLASS_IDX = 2
-SELL_CLASS_IDX = 0
-
 NONE_IDX = 0
 BUY_IDX = 1
 SELL_IDX = -1
-
-CLASS_ACTION_MAP = {
-    NONE_CLASS_IDX: NONE_IDX,
-    BUY_CLASS_IDX: BUY_IDX,
-    SELL_CLASS_IDX: SELL_IDX
-}
