@@ -62,6 +62,9 @@ class Trader:
         datas = np.array(datas)
         targets = np.array(targets)
 
+        # train_x = torch.tensor(datas).float()
+        # train_y = torch.tensor(targets).float()
+
         # shuffle
         idx_full = np.arange(len(datas))
         np.random.seed(0)
@@ -106,9 +109,8 @@ class Trader:
         best_epoch = -1
 
         # start training
-        for epoch in range(self.epochs):
-
-            print(f'=== epoch: {epoch} ===')
+        pbar = tqdm(range(self.epochs), ncols=80)
+        for epoch in pbar:
 
             # train
             self.model.train()
@@ -118,19 +120,22 @@ class Trader:
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            print(f'Train epoch: {epoch}, mse: {loss.item() :.6f}')
+            # print(f'Train epoch: {epoch}, mse: {loss.item() :.6f}')
 
             # valid
             self.model.eval()
             pred, _ = self.model(valid_x)
             loss = criterion(pred, valid_y)
-            print(f'Valid epoch: {epoch}, mse: {loss.item() :.6f}')
+            # print(f'Valid epoch: {epoch}, mse: {loss.item() :.6f}')
+
+            pbar.set_description(f'epoch: {epoch}, mse: {loss.item():.6f}')
+            pbar.update()
             
             # check whether get better result
             if loss.item() < best_val_loss:
                 best_val_loss = loss.item()
                 best_epoch = epoch
-                torch.save(self.model.state_dict(), "model.pth")
+                torch.save(self.model.state_dict(), "./data/model_data/model.pth")
 
     
         print('=== Stop Training ===')
@@ -143,7 +148,7 @@ class Trader:
             self.mode = TraderMode.TESTING
 
             # load model
-            self.model.load_state_dict(torch.load("model.pth"))
+            self.model.load_state_dict(torch.load("./data/model_data/model.pth"))
             self.model.eval()
 
             self.cur_sum = 0
